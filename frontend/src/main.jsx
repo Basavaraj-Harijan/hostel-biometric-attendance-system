@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Home, Users, UserRound, Fingerprint, ScanFace, ClipboardCheck,
   Receipt, FileText, Settings, LogOut, Menu, Search, Plus,
-  Printer, ShieldCheck, IndianRupee, CalendarDays, Activity, X
+  Printer, ShieldCheck, IndianRupee, CalendarDays, Activity, X, Camera
 } from 'lucide-react';
 import './styles.css';
 
@@ -45,10 +45,13 @@ function App() {
   const [manualDate, setManualDate] = useState(today);
   const [activeTab, setActiveTab] = useState('students');
 
-  // Single USB Fingerprint Scanner States
-  const [scannerStatus, setScannerStatus] = useState({ connected: false, message: 'Not checked' });
-  const [capturedTemplate, setCapturedTemplate] = useState('');
-  const [scanning, setScanning] = useState(false);
+  // Webcam Face Recognition States
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [capturedFace, setCapturedFace] = useState('');
+  const [processingFace, setProcessingFace] = useState(false);
 
   const persist = (key, val, setter) => {
     setter(val);
@@ -57,82 +60,147 @@ function App() {
 
   const notify = (msg) => {
     setNotice(msg);
-    setTimeout(() => setNotice(''), 3200);
+    setTimeout(() => setNotice(''), 3500);
   };
 
-  const goHome = () => {
-    setPage('landing');
-    setMobile(false);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCameraOpen(false);
   };
 
-  async function checkScanner() {
+  const startCamera = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/scanner/status');
-      const data = await res.json();
-      setScannerStatus(data);
-      notify(data.message);
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 300 } });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 100);
     } catch {
-      setScannerStatus({ connected: false, message: 'Python Biometric Service offline' });
-      notify('Python service offline on port 5000.');
+      notify('Camera access denied or webcam not found.');
     }
-  }
+  };
 
-  async function captureForRegistration() {
-    setScanning(true);
-    notify('Place finger on the USB scanner...');
-    try {
-      const res = await fetch('http://localhost:5000/api/scanner/capture', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Capture failed');
-      setCapturedTemplate(data.templateHash);
-      notify(`Fingerprint captured (Quality: ${data.quality}%)`);
-    } catch (err) {
-      notify(err.message);
-    } finally {
-      setScanning(false);
+  const grabFrameBase64 = () => {
+    if (!videoRef.current || !canvasRef.current) return '';
+    const canvas = canvasRef.current;
+    canvas.width = videoRef.current.videoWidth || 400;
+    canvas.height = videoRef.current.videoHeight || 300;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  };
+
+  const captureFaceForRegistration = async () => {
+    const imgBase64 = grabFrameBase64();
+    if (!imgBase64) {
+      notify('Open the camera first.');
+      return;
     }
-  }
+    setProcessingFace(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
 
-  async function enrollTemplateToBackend(personId, personName) {
-    if (!capturedTemplate) return;
     try {
-      await fetch('http://localhost:8081/api/biometric/enroll', {
+      const res = await fetch('http://localhost:5000/api/face/capture-check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ personId, personName, templateHash: capturedTemplate }),
+        body: JSON.stringify({ imageBase64: imgBase64 }),
+        signal: controller.signal,
       });
-    } catch {
-      notify('Saved locally, but Spring Boot backend (8081) is offline.');
-    } finally {
-      setCapturedTemplate('');
-    }
-  }
-
-  async function scanFingerprintAttendance() {
-    setScanning(true);
-    notify('Place finger on USB scanner to mark attendance...');
-    try {
-      const res = await fetch('http://localhost:5000/api/scanner/verify-attendance', { method: 'POST' });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Verification failed');
+      if (!res.ok) throw new Error(data.detail || 'No face detected');
+      setCapturedFace(imgBase64);
+      stopCamera();
+      notify('✅ Face captured clearly!');
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        notify('⚠️ Python server (port 5000) timed out. Start uvicorn in terminal.');
+      } else {
+        notify(err.message || 'Python Face Service (port 5000) offline.');
+      }
+    } finally {
+      clearTimeout(timer);
+      setProcessingFace(false);
+    }
+  };
+
+  const enrollFaceToPython = async (personId, personName, imageBase64) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch('http://localhost:5000/api/face/enroll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ personId, personName, imageBase64 }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        notify(data.detail || 'Face enrollment warning.');
+      }
+    } catch {
+      notify('Saved locally, but Python Face Service (5000) is offline.');
+    } finally {
+      clearTimeout(timer);
+      setCapturedFace('');
+    }
+  };
+
+  const scanFaceAttendance = async () => {
+    const imgBase64 = grabFrameBase64();
+    if (!imgBase64) {
+      notify('Open camera first to scan face.');
+      return;
+    }
+    setProcessingFace(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const res = await fetch('http://localhost:5000/api/face/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: imgBase64 }),
+        signal: controller.signal,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Face not recognized');
 
       const row = {
         personId: data.personId,
         name: data.name,
         date: data.attendanceDate || today,
         time: data.attendanceTime || new Date().toLocaleTimeString(),
-        method: 'Fingerprint',
+        method: 'Face AI',
         status: 'Present',
       };
       persist('attendance', [row, ...attendance], setAttendance);
+      stopCamera();
       notify(`Marked Present: ${data.name} (${data.personId})`);
     } catch (err) {
-      notify(err.message);
+      if (err.name === 'AbortError') {
+        notify('⚠️ Python server (port 5000) timed out.');
+      } else {
+        notify(err.message || 'Face verification failed.');
+      }
     } finally {
-      setScanning(false);
+      clearTimeout(timer);
+      setProcessingFace(false);
     }
-  }
+  };
+
+  const goHome = () => {
+    stopCamera();
+    setPage('landing');
+    setMobile(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const nav = [
     ['Home', 'dashboard', Home],
@@ -156,14 +224,15 @@ function App() {
   }
 
   function logout() {
+    stopCamera();
     setLogged(false);
     setPage('landing');
   }
 
   async function addStudent(e) {
     e.preventDefault();
-    if (!capturedTemplate) {
-      notify('⚠️ ಮೊದಲು Fingerprint ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ! (Capture Fingerprint first before saving)');
+    if (!capturedFace) {
+      notify('⚠️ ಮೊದಲು ಕ್ಯಾಮೆರಾ ಓಪನ್ ಮಾಡಿ Face ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ!');
       return;
     }
 
@@ -181,16 +250,17 @@ function App() {
       status: 'Active',
       biometric: true
     };
+    const faceData = capturedFace;
     persist('students', [row, ...students], setStudents);
     form.reset();
-    notify('Student & Fingerprint registered successfully!');
-    await enrollTemplateToBackend(row.id, row.name);
+    notify('Student & Face registered successfully!');
+    await enrollFaceToPython(row.id, row.name, faceData);
   }
 
   async function addEmployee(e) {
     e.preventDefault();
-    if (!capturedTemplate) {
-      notify('⚠️ ಮೊದಲು Fingerprint ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ! (Capture Fingerprint first before saving)');
+    if (!capturedFace) {
+      notify('⚠️ ಮೊದಲು ಕ್ಯಾಮೆರಾ ಓಪನ್ ಮಾಡಿ Face ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ!');
       return;
     }
 
@@ -207,10 +277,11 @@ function App() {
       status: 'Active',
       biometric: true
     };
+    const faceData = capturedFace;
     persist('employees', [row, ...employees], setEmployees);
     form.reset();
-    notify('Employee & Fingerprint registered successfully!');
-    await enrollTemplateToBackend(row.id, row.name);
+    notify('Employee & Face registered successfully!');
+    await enrollFaceToPython(row.id, row.name, faceData);
   }
 
   function mark(id, type, status = 'Present') {
@@ -262,7 +333,7 @@ function App() {
       <div className="landing">
         <header className="public-nav">
           <div className="brand" onClick={goHome} style={{ cursor: 'pointer' }}>
-            <span className="brand-icon"><Fingerprint /></span>
+            <span className="brand-icon"><ScanFace /></span>
             <span>HOSTEL<span className="brand-light">CARE</span></span>
           </div>
           <nav>
@@ -278,7 +349,7 @@ function App() {
           <div className="hero-copy">
             <div className="eyebrow"><ShieldCheck size={15} /> SMART HOSTEL MANAGEMENT</div>
             <h1>Smarter hostel life.<br /><em>Simpler management.</em></h1>
-            <p>One secure platform to manage student records, staff, single-scanner fingerprint attendance, hostel bills and reports — all in one place.</p>
+            <p>One secure platform to manage student records, staff, AI face recognition attendance, hostel bills and reports — all in one place.</p>
             <div className="hero-actions">
               <button className="btn btn-primary btn-large" onClick={() => setPage(logged ? 'dashboard' : 'login')}>
                 {logged ? 'Open Warden Dashboard' : 'Click here to Hostel Login'} <span>→</span>
@@ -287,32 +358,32 @@ function App() {
             </div>
             <div className="trust-row">
               <span><ShieldCheck size={16} /> Secure access</span>
-              <span><Activity size={16} /> USB Biometric mandatory</span>
+              <span><Activity size={16} /> Webcam Face AI ready</span>
             </div>
           </div>
           <div className="hero-art">
             <div className="art-orbit orbit-one"></div>
             <div className="art-orbit orbit-two"></div>
             <div className="face-card">
-              <div className="face-top"><span>BIOMETRIC VERIFICATION</span><span className="live-dot">● READY</span></div>
+              <div className="face-top"><span>IDENTITY VERIFICATION</span><span className="live-dot">● LIVE</span></div>
               <div className="face-scan">
-                <div className="avatar">👆</div>
+                <div className="avatar">👤</div>
                 <div className="scan-corner tl"></div><div className="scan-corner tr"></div>
                 <div className="scan-corner bl"></div><div className="scan-corner br"></div>
                 <div className="scan-line"></div>
               </div>
               <div className="face-bottom">
-                <div><b>Fingerprint scanner</b><small>1:N instant attendance</small></div>
+                <div><b>Face recognition</b><small>Webcam instant attendance</small></div>
                 <span className="checkmark">✓</span>
               </div>
             </div>
-            <div className="floating-chip chip-a"><Fingerprint size={18} /> Single USB Scanner</div>
+            <div className="floating-chip chip-a"><ScanFace size={18} /> Face AI Enabled</div>
             <div className="floating-chip chip-b"><ClipboardCheck size={18} /> Instant MySQL Sync</div>
           </div>
         </section>
         <section className="feature-strip" id="features">
-          <div><Fingerprint /><b>Fingerprint</b><small>Mandatory enrollment</small></div>
-          <div><ScanFace /><b>Face recognition</b><small>AI service scaffold</small></div>
+          <div><ScanFace /><b>Face Recognition</b><small>Webcam biometric</small></div>
+          <div><Fingerprint /><b>Fingerprint</b><small>Hardware ready</small></div>
           <div><ClipboardCheck /><b>Attendance</b><small>Daily records</small></div>
           <div><Receipt /><b>Billing</b><small>Clear statements</small></div>
         </section>
@@ -322,7 +393,7 @@ function App() {
           <p>Help wardens spend less time on paperwork and more time supporting residents.</p>
         </section>
         <footer id="contact">
-          <div className="brand" onClick={goHome} style={{ cursor: 'pointer' }}><span className="brand-icon"><Fingerprint /></span> HOSTELCARE</div>
+          <div className="brand" onClick={goHome} style={{ cursor: 'pointer' }}><span className="brand-icon"><ScanFace /></span> HOSTELCARE</div>
           <span>Hostel Biometric Attendance Management System</span>
           <span>© 2026 HostelCare</span>
         </footer>
@@ -335,7 +406,7 @@ function App() {
       <div className="login-wrap">
         <button className="back-link" onClick={goHome}>← Back to home</button>
         <div className="login-card">
-          <div className="login-symbol" onClick={goHome} style={{ cursor: 'pointer' }}><Fingerprint size={30} /></div>
+          <div className="login-symbol" onClick={goHome} style={{ cursor: 'pointer' }}><ScanFace size={30} /></div>
           <div className="section-kicker">WARDEN PORTAL</div>
           <h2>Welcome back</h2>
           <p>Sign in to manage your hostel.</p>
@@ -355,14 +426,14 @@ function App() {
       <aside className={`sidebar ${mobile ? 'show' : ''}`}>
         <div className="side-brand">
           <div onClick={goHome} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-            <span className="brand-icon"><Fingerprint /></span>
+            <span className="brand-icon"><ScanFace /></span>
             <div><b>HOSTELCARE</b><small>WARDEN PORTAL</small></div>
           </div>
           <button className="icon-btn mobile-close" onClick={() => setMobile(false)}><X /></button>
         </div>
         <div className="side-label">WORKSPACE</div>
         {nav.map(([label, key, Icon]) => (
-          <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => { setPage(key); setMobile(false); }}>
+          <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => { stopCamera(); setPage(key); setMobile(false); }}>
             <Icon size={18} /><span>{label}</span>{page === key && <i />}
           </button>
         ))}
@@ -446,8 +517,8 @@ function App() {
           </section>
           <section className="panel quick-panel">
             <div className="panel-head"><div><h3>Quick actions</h3><p>Common tasks</p></div></div>
-            <button onClick={() => setPage('registration')}><span className="quick-icon blue"><Plus /></span><span><b>Register a student</b><small>Enroll details & fingerprint</small></span><span>→</span></button>
-            <button onClick={() => setPage('attendance')}><span className="quick-icon green"><Fingerprint /></span><span><b>Fingerprint attendance</b><small>Scan using USB scanner</small></span><span>→</span></button>
+            <button onClick={() => setPage('registration')}><span className="quick-icon blue"><Plus /></span><span><b>Register a student</b><small>Enroll details & face</small></span><span>→</span></button>
+            <button onClick={() => setPage('attendance')}><span className="quick-icon green"><ScanFace /></span><span><b>Face attendance</b><small>Scan using webcam</small></span><span>→</span></button>
             <button onClick={() => setPage('billing')}><span className="quick-icon orange"><Receipt /></span><span><b>Generate a bill</b><small>Create a student bill</small></span><span>→</span></button>
             <button onClick={() => setPage('reports')}><span className="quick-icon purple"><FileText /></span><span><b>View reports</b><small>Monthly insights</small></span><span>→</span></button>
           </section>
@@ -456,19 +527,50 @@ function App() {
     );
   }
 
+  function faceCaptureBox() {
+    return (
+      <div className="full-span note-box" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+          <span>{capturedFace ? '✅ Face captured clearly!' : '⚠️ Face capture required before saving'}</span>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {!cameraOpen ? (
+              <button type="button" className="btn btn-outline" onClick={startCamera}>
+                <Camera size={16} /> Open Camera
+              </button>
+            ) : (
+              <>
+                <button type="button" className="btn btn-primary" disabled={processingFace} onClick={captureFaceForRegistration}>
+                  <ScanFace size={16} /> {processingFace ? 'Checking...' : 'Capture Face'}
+                </button>
+                <button type="button" className="btn btn-outline" onClick={stopCamera}>Close</button>
+              </>
+            )}
+          </div>
+        </div>
+        {cameraOpen && (
+          <video ref={videoRef} autoPlay playsInline style={{ width: '100%', maxWidth: '320px', borderRadius: '10px', border: '2px solid #2563eb' }} />
+        )}
+        {capturedFace && !cameraOpen && (
+          <img src={capturedFace} alt="Captured face" style={{ width: '120px', height: '90px', objectFit: 'cover', borderRadius: '8px', border: '2px solid #16a34a' }} />
+        )}
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
+      </div>
+    );
+  }
+
   function registration() {
     return (
       <>
         <div className="tabs">
-          <button className={activeTab === 'students' ? 'selected' : ''} onClick={() => { setActiveTab('students'); setCapturedTemplate(''); }}>Student Registration</button>
-          <button className={activeTab === 'employees' ? 'selected' : ''} onClick={() => { setActiveTab('employees'); setCapturedTemplate(''); }}>Employee Registration</button>
+          <button className={activeTab === 'students' ? 'selected' : ''} onClick={() => { stopCamera(); setActiveTab('students'); setCapturedFace(''); }}>Student Registration</button>
+          <button className={activeTab === 'employees' ? 'selected' : ''} onClick={() => { stopCamera(); setActiveTab('employees'); setCapturedFace(''); }}>Employee Registration</button>
         </div>
         <div className="content-grid form-layout">
           <section className="panel">
             <div className="panel-head">
               <div>
                 <h3>{activeTab === 'students' ? 'Register student' : 'Register employee'}</h3>
-                <p>Biometric fingerprint capture is mandatory before saving.</p>
+                <p>Capture face photo via webcam before saving record.</p>
               </div>
             </div>
             {activeTab === 'students' ? (
@@ -477,12 +579,7 @@ function App() {
                 <label>Course / department<input name="course" type="text" required placeholder="e.g. B.E. CSE" /></label>
                 <label>Room number<input name="room" type="text" required placeholder="e.g. 104" /></label>
                 <label>Mobile number<input name="phone" type="tel" required pattern="[0-9]{10}" placeholder="10-digit number" /></label>
-                <div className="full-span note-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                  <span>{capturedTemplate ? '✅ Fingerprint template captured' : '⚠️ Capture fingerprint required'}</span>
-                  <button type="button" className="btn btn-outline" disabled={scanning} onClick={captureForRegistration}>
-                    <Fingerprint size={16} /> {scanning ? 'Scanning...' : 'Capture Fingerprint'}
-                  </button>
-                </div>
+                {faceCaptureBox()}
                 <button type="submit" className="btn btn-primary full-span"><Plus size={16} /> Save student</button>
               </form>
             ) : (
@@ -490,12 +587,7 @@ function App() {
                 <label>Employee name<input name="name" type="text" required placeholder="Full name" /></label>
                 <label>Designation<input name="role" type="text" required placeholder="e.g. Warden assistant" /></label>
                 <label>Mobile number<input name="phone" type="tel" required pattern="[0-9]{10}" placeholder="10-digit number" /></label>
-                <div className="full-span note-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                  <span>{capturedTemplate ? '✅ Fingerprint template captured' : '⚠️ Capture fingerprint required'}</span>
-                  <button type="button" className="btn btn-outline" disabled={scanning} onClick={captureForRegistration}>
-                    <Fingerprint size={16} /> {scanning ? 'Scanning...' : 'Capture Fingerprint'}
-                  </button>
-                </div>
+                {faceCaptureBox()}
                 <button type="submit" className="btn btn-primary full-span"><Plus size={16} /> Save employee</button>
               </form>
             )}
@@ -514,7 +606,7 @@ function App() {
                   <div className="record-avatar">{p.name[0]}</div>
                   <div>
                     <b>{p.name}</b>
-                    <small>{p.id} · {activeTab === 'students' ? `Room ${p.room}` : p.role} {p.biometric ? '· 👆 Enrolled' : ''}</small>
+                    <small>{p.id} · {activeTab === 'students' ? `Room ${p.room}` : p.role} {p.biometric ? '· 👤 Face Enrolled' : ''}</small>
                   </div>
                   <span className="status present">{p.status}</span>
                 </div>
@@ -530,29 +622,43 @@ function App() {
     return (
       <>
         <div className="welcome-row">
-          <div><h3>Attendance management</h3><p>Use your single USB fingerprint scanner or record attendance manually.</p></div>
+          <div><h3>Attendance management</h3><p>Scan face via webcam or record attendance manually.</p></div>
           <input className="date-input" type="date" value={manualDate} onChange={e => setManualDate(e.target.value)} />
         </div>
         <div className="method-grid">
           <div className="method-card">
-            <div className="method-icon blue"><Fingerprint /></div>
-            <h3>Fingerprint attendance</h3>
-            <p>Single USB scanner connected via Python bridge (port 5000) & Spring Boot (8081).</p>
-            <span className={`status ${scannerStatus.connected ? 'present' : 'warning'}`}>{scannerStatus.message}</span>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
-              <button className="btn btn-outline" onClick={checkScanner}>Check device</button>
-              <button className="btn btn-primary" disabled={scanning} onClick={scanFingerprintAttendance}>
-                {scanning ? 'Place Finger...' : 'Scan & Mark Present'}
-              </button>
-            </div>
-          </div>
-          <div className="method-card">
             <div className="method-icon purple"><ScanFace /></div>
             <h3>AI face recognition</h3>
-            <p>Use a camera, enrolled face templates and liveness checks to verify identity.</p>
-            <span className="status warning">Camera & model optional</span>
-            <button className="btn btn-outline" onClick={() => notify('Face recognition requires camera and model configuration in main.py.')}>Open face service</button>
+            <p>Use your webcam to verify enrolled face and mark Present automatically.</p>
+            <span className="status present">Webcam AI active (Port 5000)</span>
+            {cameraOpen && (
+              <video ref={videoRef} autoPlay playsInline style={{ width: '100%', borderRadius: '10px', marginTop: '8px', border: '2px solid #7c3aed' }} />
+            )}
+            <canvas ref={canvasRef} style={{ display: 'none' }} />
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px' }}>
+              {!cameraOpen ? (
+                <button className="btn btn-primary" onClick={startCamera}>
+                  <Camera size={16} /> Open Face Camera
+                </button>
+              ) : (
+                <>
+                  <button className="btn btn-primary" disabled={processingFace} onClick={scanFaceAttendance}>
+                    {processingFace ? 'Verifying...' : 'Scan & Mark Present'}
+                  </button>
+                  <button className="btn btn-outline" onClick={stopCamera}>Stop</button>
+                </>
+              )}
+            </div>
           </div>
+
+          <div className="method-card">
+            <div className="method-icon blue"><Fingerprint /></div>
+            <h3>Fingerprint attendance</h3>
+            <p>Optional external USB RD Service scanner bridge.</p>
+            <span className="status warning">Optional hardware</span>
+            <button className="btn btn-outline" onClick={() => notify('Using Face Recognition as primary biometric mode.')}>Check status</button>
+          </div>
+
           <div className="method-card">
             <div className="method-icon green"><ClipboardCheck /></div>
             <h3>Manual attendance</h3>
@@ -686,10 +792,10 @@ function App() {
   function settings() {
     return (
       <section className="panel settings-panel">
-        <div className="panel-head"><div><h3>System settings</h3><p>Hardware & backend service connection status.</p></div></div>
+        <div className="panel-head"><div><h3>System settings</h3><p>Face recognition & backend service status.</p></div></div>
         <div className="setting-row">
-          <div><b>Python Biometric Bridge</b><small>http://localhost:5000 (USB RD Service connector)</small></div>
-          <span className={`status ${scannerStatus.connected ? 'present' : 'warning'}`}>{scannerStatus.message}</span>
+          <div><b>Python Face Recognition Service</b><small>http://localhost:5000 (OpenCV Haar Cascade)</small></div>
+          <span className="status present">Active</span>
         </div>
         <div className="setting-row">
           <div><b>Spring Boot REST API</b><small>http://localhost:8081/api/biometric (MySQL persistence)</small></div>
