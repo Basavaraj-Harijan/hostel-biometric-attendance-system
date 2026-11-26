@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from io import BytesIO
+from PIL import Image, ImageOps
 import base64
-import cv2
 import numpy as np
 import requests
 import os
@@ -23,10 +24,6 @@ SPRING_BOOT_URL = "http://localhost:8081/api/biometric"
 FACES_DIR = "enrolled_faces"
 os.makedirs(FACES_DIR, exist_ok=True)
 
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
-
 
 class FaceEnrollPayload(BaseModel):
     personId: str
@@ -38,32 +35,24 @@ class FaceVerifyPayload(BaseModel):
     imageBase64: str
 
 
-def decode_and_extract_face(image_base64: str):
+def decode_and_extract_face(image_base64: str) -> np.ndarray:
     if "," in image_base64:
         image_base64 = image_base64.split(",")[1]
     try:
         img_bytes = base64.b64decode(image_base64)
-        np_arr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        img = Image.open(BytesIO(img_bytes)).convert("L")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image format")
 
-    if img is None:
-        raise HTTPException(status_code=400, detail="Could not decode camera image")
+    # ಕ್ಯಾಮೆರಾ ಫ್ರೇಮ್ ಮಧ್ಯಭಾಗದ ಮುಖದ ಪ್ರದೇಶವನ್ನು ಕ್ರಾಪ್ ಮಾಡಿ 100x100 ಗೆ ಹೊಂದಿಸುವುದು
+    w, h = img.size
+    if w < 50 or h < 50:
+        raise HTTPException(status_code=400, detail="Camera frame too small")
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
-    )
-    if len(faces) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No face detected. Look directly at the camera with good lighting.",
-        )
-
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-    face_roi = cv2.resize(gray[y : y + h, x : x + w], (100, 100))
-    return cv2.equalizeHist(face_roi)
+    crop_box = (int(w * 0.25), int(h * 0.15), int(w * 0.75), int(h * 0.85))
+    face_roi = img.crop(crop_box).resize((100, 100))
+    face_eq = ImageOps.equalize(face_roi)
+    return np.asarray(face_eq, dtype=np.uint8)
 
 
 @app.get("/health")
@@ -83,12 +72,12 @@ def check_face_in_frame(payload: FaceVerifyPayload):
 
 @app.post("/api/face/enroll")
 def enroll_face(payload: FaceEnrollPayload):
-    face_img = decode_and_extract_face(payload.imageBase64)
+    face_arr = decode_and_extract_face(payload.imageBase64)
     img_path = os.path.join(FACES_DIR, f"{payload.personId}.png")
     meta_path = os.path.join(FACES_DIR, f"{payload.personId}.json")
 
-    cv2.imwrite(img_path, face_img)
-    with open(meta_path, "w") as f:
+    Image.fromarray(face_arr).save(img_path)
+    with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(
             {"personId": payload.personId, "personName": payload.personName}, f
         )
@@ -112,7 +101,8 @@ def enroll_face(payload: FaceEnrollPayload):
 
 @app.post("/api/face/verify")
 def verify_face(payload: FaceVerifyPayload):
-    live_face = decode_and_extract_face(payload.imageBase64)
+    live_face = decode_and_extract_face(payload.imageBase64).astype(np.float32)
+    live_norm = (live_face - live_face.mean()) / (live_face.std() + 1e-6)
 
     best_score = -1.0
     matched_meta = None
@@ -121,22 +111,24 @@ def verify_face(payload: FaceVerifyPayload):
         if not fname.endswith(".png"):
             continue
         pid = fname.replace(".png", "")
-        saved_face = cv2.imread(
-            os.path.join(FACES_DIR, fname), cv2.IMREAD_GRAYSCALE
-        )
-        if saved_face is None:
+        saved_path = os.path.join(FACES_DIR, fname)
+        try:
+            saved_img = Image.open(saved_path).convert("L").resize((100, 100))
+        except Exception:
             continue
 
-        res = cv2.matchTemplate(live_face, saved_face, cv2.TM_CCOEFF_NORMED)
-        score = float(res[0][0])
+        saved_face = np.asarray(saved_img, dtype=np.float32)
+        saved_norm = (saved_face - saved_face.mean()) / (saved_face.std() + 1e-6)
+        score = float(np.mean(live_norm * saved_norm))
+
         if score > best_score:
             best_score = score
             meta_file = os.path.join(FACES_DIR, f"{pid}.json")
             if os.path.exists(meta_file):
-                with open(meta_file) as f:
+                with open(meta_file, encoding="utf-8") as f:
                     matched_meta = json.load(f)
 
-    if matched_meta is None or best_score < 0.55:
+    if matched_meta is None or best_score < 0.45:
         raise HTTPException(
             status_code=404,
             detail="Face not recognized. Please register face first.",
