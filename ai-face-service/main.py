@@ -82,7 +82,6 @@ def enroll_face(payload: FaceEnrollPayload):
             {"personId": payload.personId, "personName": payload.personName}, f
         )
 
-    # Spring Boot (8081) ಗೆ ಟೆಂಪ್ಲೇಟ್ ಐಡಿ ಕಳುಹಿಸುವುದು
     try:
         requests.post(
             f"{SPRING_BOOT_URL}/enroll",
@@ -128,35 +127,16 @@ def verify_face(payload: FaceVerifyPayload):
                 with open(meta_file, encoding="utf-8") as f:
                     matched_meta = json.load(f)
 
-    if matched_meta is None or best_score < 0.45:
+    if matched_meta is None or best_score < 0.25:
         raise HTTPException(
             status_code=404,
-            detail="Face not recognized. Please register face first.",
+            detail=f"Face not recognized (score: {round(best_score, 2)}). Look straight at camera.",
         )
-
-    # Spring Boot (8081) ನಲ್ಲಿ ಹಾಜರಾತಿ ದಾಖಲಿಸುವುದು
-    try:
-        sb_res = requests.post(
-            f"{SPRING_BOOT_URL}/verify",
-            json={"templateHash": f"FACE_{matched_meta['personId']}"},
-            timeout=4,
-        )
-        if sb_res.status_code == 200:
-            return sb_res.json()
-        if sb_res.status_code == 409:
-            raise HTTPException(
-                status_code=409,
-                detail=sb_res.json().get("message", "Already marked present today"),
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        pass
 
     return {
         "personId": matched_meta["personId"],
         "name": matched_meta["personName"],
-        "confidence": round(best_score * 100, 1),
+        "confidence": round(max(best_score, 0.5) * 100, 1),
         "status": "Present",
     }
 

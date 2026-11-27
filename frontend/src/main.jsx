@@ -1,832 +1,643 @@
-import React, { useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import {
-  Home, Users, UserRound, Fingerprint, ScanFace, ClipboardCheck,
-  Receipt, FileText, Settings, LogOut, Menu, Search, Plus,
-  Printer, ShieldCheck, IndianRupee, CalendarDays, Activity, X, Camera
-} from 'lucide-react';
-import './styles.css';
+import React, { useState, useEffect, useRef } from "react";
+import ReactDOM from "react-dom/client";
+import { api } from "./api";
 
-const initialStudents = [
-  { id: 'STU001', name: 'Aarav Patil', course: 'B.E. CSE', room: '101', phone: '9876543210', status: 'Active', biometric: true },
-  { id: 'STU002', name: 'Sneha Kulkarni', course: 'BCA', room: '102', phone: '9876543211', status: 'Active', biometric: true },
-  { id: 'STU003', name: 'Rahul Desai', course: 'B.E. ECE', room: '103', phone: '9876543212', status: 'Active', biometric: true }
-];
+function HostelCareApp() {
+  const [role, setRole] = useState("WARDEN"); // "WARDEN" ಅಥವಾ "STUDENT"
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [students, setStudents] = useState([]);
+  const [attendance, setAttendance] = useState([]);
+  const [defaulters, setDefaulters] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
 
-const initialEmployees = [
-  { id: 'EMP001', name: 'Ramesh Kumar', role: 'Warden Assistant', phone: '9876500001', status: 'Active', biometric: true },
-  { id: 'EMP002', name: 'Savita Patil', role: 'Cook', phone: '9876500002', status: 'Active', biometric: true }
-];
-
-const today = new Date().toISOString().slice(0, 10);
-
-function read(key, fallback) {
-  try {
-    return JSON.parse(localStorage.getItem(key)) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function App() {
-  const [page, setPage] = useState('landing');
-  const [logged, setLogged] = useState(false);
-  const [mobile, setMobile] = useState(false);
-  const [students, setStudents] = useState(() => read('students', initialStudents));
-  const [employees, setEmployees] = useState(() => read('employees', initialEmployees));
-  const [attendance, setAttendance] = useState(() => read('attendance', []));
-  const [bills, setBills] = useState(() => read('bills', []));
-  const [query, setQuery] = useState('');
-  const [notice, setNotice] = useState('');
-  const [billForm, setBillForm] = useState({
-    studentId: '', month: new Date().toISOString().slice(0, 7),
-    rent: 5000, mess: 2500, electricity: 300, other: 0, paid: 0
+  // Registration State
+  const [regForm, setRegForm] = useState({
+    id: `STU${Math.floor(100000 + Math.random() * 900000)}`,
+    name: "",
+    course: "B.E CSE",
+    room: "",
+    phone: "",
   });
-  const [manualDate, setManualDate] = useState(today);
-  const [activeTab, setActiveTab] = useState('students');
+  const [capturedImg, setCapturedImg] = useState(null);
+  const [regMessage, setRegMessage] = useState({ text: "", type: "" });
+  const [loading, setLoading] = useState(false);
 
-  // Webcam Face Recognition States
+  // Live Attendance State
+  const [scanMessage, setScanMessage] = useState({ text: "", type: "" });
+  const [cameraActive, setCameraActive] = useState(false);
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
-  const [cameraOpen, setCameraOpen] = useState(false);
-  const [capturedFace, setCapturedFace] = useState('');
-  const [processingFace, setProcessingFace] = useState(false);
 
-  const persist = (key, val, setter) => {
-    setter(val);
-    localStorage.setItem(key, JSON.stringify(val));
+  // MySQL ನಿಂದ ಎಲ್ಲಾ ಡೇಟಾ ಸಿಂಕ್ ಮಾಡುವುದು
+  const syncMySQLData = async () => {
+    try {
+      const [stuData, attData, defData] = await Promise.all([
+        fetch("http://localhost:8081/api/students").then((r) => (r.ok ? r.json() : [])),
+        fetch("http://localhost:8081/api/biometric/records").then((r) => (r.ok ? r.json() : [])),
+        fetch("http://localhost:8081/api/biometric/defaulters").then((r) => (r.ok ? r.json() : [])),
+      ]);
+      setStudents(Array.isArray(stuData) ? stuData : []);
+      setAttendance(Array.isArray(attData) ? [...attData].reverse() : []);
+      setDefaulters(Array.isArray(defData) ? defData : []);
+    } catch (err) {
+      console.error("MySQL Sync Error:", err);
+    }
   };
 
-  const notify = (msg) => {
-    setNotice(msg);
-    setTimeout(() => setNotice(''), 3500);
+  useEffect(() => {
+    syncMySQLData();
+    return () => stopCamera();
+  }, []);
+
+  // Camera Controls
+  const startCamera = async () => {
+    try {
+      stopCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setCameraActive(true);
+    } catch {
+      alert("Camera permission denied! Please allow camera access.");
+    }
   };
 
   const stopCamera = () => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
-    setCameraOpen(false);
+    setCameraActive(false);
   };
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 300 } });
-      streamRef.current = stream;
-      setCameraOpen(true);
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      }, 100);
-    } catch {
-      notify('Camera access denied or webcam not found.');
-    }
-  };
-
-  const grabFrameBase64 = () => {
-    if (!videoRef.current || !canvasRef.current) return '';
+  const getFrameBase64 = () => {
+    if (!videoRef.current || !canvasRef.current) return null;
     const canvas = canvasRef.current;
-    canvas.width = videoRef.current.videoWidth || 400;
-    canvas.height = videoRef.current.videoHeight || 300;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.85);
+    canvas.width = videoRef.current.videoWidth || 640;
+    canvas.height = videoRef.current.videoHeight || 480;
+    canvas.getContext("2d").drawImage(videoRef.current, 0, 0);
+    return canvas.toDataURL("image/jpeg");
   };
 
-  const captureFaceForRegistration = async () => {
-    const imgBase64 = grabFrameBase64();
-    if (!imgBase64) {
-      notify('Open the camera first.');
-      return;
-    }
-    setProcessingFace(true);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-
+  // 1. Capture Face for Registration
+  const handleCaptureFace = async () => {
+    const img = getFrameBase64();
+    if (!img) return;
+    setRegMessage({ text: "Checking face clarity...", type: "info" });
     try {
-      const res = await fetch('http://localhost:5000/api/face/capture-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: imgBase64 }),
-        signal: controller.signal,
+      const res = await fetch("http://localhost:5000/api/face/capture-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: img }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'No face detected');
-      setCapturedFace(imgBase64);
-      stopCamera();
-      notify('✅ Face captured clearly!');
+      if (!res.ok) throw new Error(data.detail || "Face not clear");
+      setCapturedImg(img);
+      setRegMessage({ text: "✅ Face captured clearly! Now click Save.", type: "success" });
     } catch (err) {
-      if (err.name === 'AbortError') {
-        notify('⚠️ Python server (port 5000) timed out. Start uvicorn in terminal.');
-      } else {
-        notify(err.message || 'Python Face Service (port 5000) offline.');
-      }
-    } finally {
-      clearTimeout(timer);
-      setProcessingFace(false);
+      setRegMessage({ text: `⚠️ ${err.message}`, type: "error" });
     }
   };
 
-  const enrollFaceToPython = async (personId, personName, imageBase64) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    try {
-      const res = await fetch('http://localhost:5000/api/face/enroll', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ personId, personName, imageBase64 }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        notify(data.detail || 'Face enrollment warning.');
-      }
-    } catch {
-      notify('Saved locally, but Python Face Service (5000) is offline.');
-    } finally {
-      clearTimeout(timer);
-      setCapturedFace('');
+  // 2. Save Student & Face
+  const handleSaveRegistration = async (e) => {
+    e.preventDefault();
+    if (!regForm.name || !regForm.room) {
+      return setRegMessage({ text: "⚠️ Enter Student Name and Room Number", type: "error" });
     }
-  };
-
-  const scanFaceAttendance = async () => {
-    const imgBase64 = grabFrameBase64();
-    if (!imgBase64) {
-      notify('Open camera first to scan face.');
-      return;
+    if (!capturedImg) {
+      return setRegMessage({ text: "⚠️ Please capture face first!", type: "error" });
     }
-    setProcessingFace(true);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-
+    setLoading(true);
+    setRegMessage({ text: "Saving to MySQL & Face AI...", type: "info" });
     try {
-      const res = await fetch('http://localhost:5000/api/face/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: imgBase64 }),
-        signal: controller.signal,
+      await api.registerStudent(regForm, capturedImg);
+      setRegMessage({ text: `✅ ${regForm.name} (${regForm.id}) registered in MySQL!`, type: "success" });
+      setRegForm({
+        id: `STU${Math.floor(100000 + Math.random() * 900000)}`,
+        name: "",
+        course: "B.E CSE",
+        room: "",
+        phone: "",
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Face not recognized');
-
-      const row = {
-        personId: data.personId,
-        name: data.name,
-        date: data.attendanceDate || today,
-        time: data.attendanceTime || new Date().toLocaleTimeString(),
-        method: 'Face AI',
-        status: 'Present',
-      };
-      persist('attendance', [row, ...attendance], setAttendance);
+      setCapturedImg(null);
       stopCamera();
-      notify(`Marked Present: ${data.name} (${data.personId})`);
+      await syncMySQLData();
     } catch (err) {
-      if (err.name === 'AbortError') {
-        notify('⚠️ Python server (port 5000) timed out.');
-      } else {
-        notify(err.message || 'Face verification failed.');
-      }
+      setRegMessage({ text: `❌ ${err.message}`, type: "error" });
     } finally {
-      clearTimeout(timer);
-      setProcessingFace(false);
+      setLoading(false);
     }
   };
 
-  const goHome = () => {
-    stopCamera();
-    setPage('landing');
-    setMobile(false);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  // 3. Live Face Scan -> Mark Attendance in MySQL
+  const handleScanAttendance = async () => {
+    const img = getFrameBase64();
+    if (!img) return setScanMessage({ text: "⚠️ Please open camera first!", type: "error" });
+    setLoading(true);
+    setScanMessage({ text: "🔍 Verifying biometric face...", type: "info" });
+    try {
+      const saved = await api.verifyAndMarkAttendance(img);
+      setScanMessage({
+        text: `✅ ${saved.personName} (${saved.personId}) — ${saved.status} at ${saved.punchTime}`,
+        type: saved.status === "Late Entry" ? "warning" : "success",
+      });
+      await syncMySQLData();
+    } catch (err) {
+      setScanMessage({ text: `⚠️ ${err.message}`, type: "error" });
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const nav = [
-    ['Home', 'dashboard', Home],
-    ['Registration', 'registration', Users],
-    ['Attendance', 'attendance', ClipboardCheck],
-    ['Bill Details', 'billing', Receipt],
-    ['Reports', 'reports', FileText],
-    ['Settings', 'settings', Settings]
-  ];
+  // 4. Export CSV Report
+  const exportAttendanceCSV = () => {
+    if (attendance.length === 0) return alert("No attendance records available to export!");
+    const csvRows = [
+      "Record ID,Student ID,Student Name,Date,Punch Time,Status,Confidence %",
+      ...attendance.map(
+        (r) => `${r.id},${r.personId},"${r.personName}",${r.attendanceDate},${r.punchTime},${r.status},${r.confidence}`
+      ),
+    ];
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `HOSTELCARE_Attendance_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+  };
 
-  function login(e) {
-    e.preventDefault();
-    const f = new FormData(e.currentTarget);
-    if (f.get('username') === 'warden' && f.get('password') === 'hostel123') {
-      setLogged(true);
-      setPage('dashboard');
-      notify('Welcome, Warden!');
-    } else {
-      notify('Invalid demo credentials.');
-    }
-  }
-
-  function logout() {
+  const switchTab = (tab) => {
     stopCamera();
-    setLogged(false);
-    setPage('landing');
-  }
+    setScanMessage({ text: "", type: "" });
+    setRegMessage({ text: "", type: "" });
+    setActiveTab(tab);
+  };
 
-  async function addStudent(e) {
-    e.preventDefault();
-    if (!capturedFace) {
-      notify('⚠️ ಮೊದಲು ಕ್ಯಾಮೆರಾ ಓಪನ್ ಮಾಡಿ Face ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ!');
-      return;
-    }
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const presentTodayCount = attendance.filter((a) => a.attendanceDate === todayStr).length;
+  const lateEntriesCount = attendance.filter((a) => a.status === "Late Entry").length;
 
-    const form = e.currentTarget;
-    const f = new FormData(form);
-    const name = String(f.get('name') || '').trim();
-    const course = String(f.get('course') || '').trim();
-    const room = String(f.get('room') || '').trim();
-    const phone = String(f.get('phone') || '').trim();
-    if (!name) return;
+  const filteredStudents = students.filter(
+    (s) =>
+      s.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.id?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.room?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
-    const row = {
-      id: 'STU' + String(Date.now()).slice(-6),
-      name, course, room, phone,
-      status: 'Active',
-      biometric: true
-    };
-    const faceData = capturedFace;
-    persist('students', [row, ...students], setStudents);
-    form.reset();
-    notify('Student & Face registered successfully!');
-    await enrollFaceToPython(row.id, row.name, faceData);
-  }
-
-  async function addEmployee(e) {
-    e.preventDefault();
-    if (!capturedFace) {
-      notify('⚠️ ಮೊದಲು ಕ್ಯಾಮೆರಾ ಓಪನ್ ಮಾಡಿ Face ಕ್ಯಾಪ್ಚರ್ ಮಾಡಿ!');
-      return;
-    }
-
-    const form = e.currentTarget;
-    const f = new FormData(form);
-    const name = String(f.get('name') || '').trim();
-    const role = String(f.get('role') || '').trim();
-    const phone = String(f.get('phone') || '').trim();
-    if (!name) return;
-
-    const row = {
-      id: 'EMP' + String(Date.now()).slice(-6),
-      name, role, phone,
-      status: 'Active',
-      biometric: true
-    };
-    const faceData = capturedFace;
-    persist('employees', [row, ...employees], setEmployees);
-    form.reset();
-    notify('Employee & Face registered successfully!');
-    await enrollFaceToPython(row.id, row.name, faceData);
-  }
-
-  function mark(id, type, status = 'Present') {
-    if (attendance.some(a => a.personId === id && a.date === manualDate)) {
-      notify('Attendance already exists for this person and date.');
-      return;
-    }
-    const person = [...students, ...employees].find(p => p.id === id);
-    const row = {
-      personId: id,
-      name: person?.name || id,
-      date: manualDate,
-      time: new Date().toLocaleTimeString(),
-      method: type,
-      status
-    };
-    persist('attendance', [row, ...attendance], setAttendance);
-    notify(`${type} attendance recorded.`);
-  }
-
-  function createBill(e) {
-    e.preventDefault();
-    const student = students.find(s => s.id === billForm.studentId);
-    if (!student) {
-      notify('Select a student first.');
-      return;
-    }
-    const total = Number(billForm.rent) + Number(billForm.mess) + Number(billForm.electricity) + Number(billForm.other);
-    const row = {
-      ...billForm,
-      id: 'BILL' + String(Date.now()).slice(-6),
-      studentName: student.name,
-      total,
-      balance: Math.max(0, total - Number(billForm.paid)),
-      status: Number(billForm.paid) >= total ? 'Paid' : Number(billForm.paid) > 0 ? 'Partial' : 'Unpaid'
-    };
-    persist('bills', [row, ...bills], setBills);
-    notify('Bill generated.');
-  }
-
-  const presentToday = attendance.filter(a => a.date === today && a.status === 'Present').length;
-  const filteredStudents = students.filter(s => (s.name + s.id + s.room).toLowerCase().includes(query.toLowerCase()));
-  const filteredEmployees = employees.filter(s => (s.name + s.id + s.role).toLowerCase().includes(query.toLowerCase()));
-  const totalBilled = bills.reduce((n, b) => n + b.total, 0);
-  const pageTitle = nav.find(n => n[1] === page)?.[0] || 'Dashboard';
-
-  function landing() {
-    return (
-      <div className="landing">
-        <header className="public-nav">
-          <div className="brand" onClick={goHome} style={{ cursor: 'pointer' }}>
-            <span className="brand-icon"><ScanFace /></span>
-            <span>HOSTEL<span className="brand-light">CARE</span></span>
+  return (
+    <div style={ui.appWrapper}>
+      {/* LEFT SIDEBAR — HOSTELCARE ORIGINAL DARK THEME */}
+      <aside style={ui.sidebar}>
+        <div style={ui.brandHeader}>
+          <div style={ui.brandIcon}>H</div>
+          <div>
+            <div style={ui.brandName}>HOSTELCARE</div>
+            <div style={ui.brandTag}>Biometric Attendance v2.0</div>
           </div>
-          <nav>
-            <a href="#about">About</a>
-            <a href="#features">Features</a>
-            <a href="#contact">Contact</a>
-          </nav>
-          <button className="btn btn-primary" onClick={() => setPage(logged ? 'dashboard' : 'login')}>
-            {logged ? 'Go to Dashboard' : 'Hostel Login'} <span>→</span>
-          </button>
-        </header>
-        <section className="hero">
-          <div className="hero-copy">
-            <div className="eyebrow"><ShieldCheck size={15} /> SMART HOSTEL MANAGEMENT</div>
-            <h1>Smarter hostel life.<br /><em>Simpler management.</em></h1>
-            <p>One secure platform to manage student records, staff, AI face recognition attendance, hostel bills and reports — all in one place.</p>
-            <div className="hero-actions">
-              <button className="btn btn-primary btn-large" onClick={() => setPage(logged ? 'dashboard' : 'login')}>
-                {logged ? 'Open Warden Dashboard' : 'Click here to Hostel Login'} <span>→</span>
-              </button>
-              <a href="#features" className="text-link">Explore features ↓</a>
-            </div>
-            <div className="trust-row">
-              <span><ShieldCheck size={16} /> Secure access</span>
-              <span><Activity size={16} /> Webcam Face AI ready</span>
-            </div>
-          </div>
-          <div className="hero-art">
-            <div className="art-orbit orbit-one"></div>
-            <div className="art-orbit orbit-two"></div>
-            <div className="face-card">
-              <div className="face-top"><span>IDENTITY VERIFICATION</span><span className="live-dot">● LIVE</span></div>
-              <div className="face-scan">
-                <div className="avatar">👤</div>
-                <div className="scan-corner tl"></div><div className="scan-corner tr"></div>
-                <div className="scan-corner bl"></div><div className="scan-corner br"></div>
-                <div className="scan-line"></div>
-              </div>
-              <div className="face-bottom">
-                <div><b>Face recognition</b><small>Webcam instant attendance</small></div>
-                <span className="checkmark">✓</span>
-              </div>
-            </div>
-            <div className="floating-chip chip-a"><ScanFace size={18} /> Face AI Enabled</div>
-            <div className="floating-chip chip-b"><ClipboardCheck size={18} /> Instant MySQL Sync</div>
-          </div>
-        </section>
-        <section className="feature-strip" id="features">
-          <div><ScanFace /><b>Face Recognition</b><small>Webcam biometric</small></div>
-          <div><Fingerprint /><b>Fingerprint</b><small>Hardware ready</small></div>
-          <div><ClipboardCheck /><b>Attendance</b><small>Daily records</small></div>
-          <div><Receipt /><b>Billing</b><small>Clear statements</small></div>
-        </section>
-        <section className="about-section" id="about">
-          <div className="section-kicker">ONE CONNECTED WORKSPACE</div>
-          <h2>Everything your hostel needs,<br />in one simple system.</h2>
-          <p>Help wardens spend less time on paperwork and more time supporting residents.</p>
-        </section>
-        <footer id="contact">
-          <div className="brand" onClick={goHome} style={{ cursor: 'pointer' }}><span className="brand-icon"><ScanFace /></span> HOSTELCARE</div>
-          <span>Hostel Biometric Attendance Management System</span>
-          <span>© 2026 HostelCare</span>
-        </footer>
-      </div>
-    );
-  }
-
-  function loginPage() {
-    return (
-      <div className="login-wrap">
-        <button className="back-link" onClick={goHome}>← Back to home</button>
-        <div className="login-card">
-          <div className="login-symbol" onClick={goHome} style={{ cursor: 'pointer' }}><ScanFace size={30} /></div>
-          <div className="section-kicker">WARDEN PORTAL</div>
-          <h2>Welcome back</h2>
-          <p>Sign in to manage your hostel.</p>
-          <form onSubmit={login}>
-            <label>Username<input name="username" placeholder="Enter username" required /></label>
-            <label>Password<input name="password" type="password" placeholder="Enter password" required /></label>
-            <button className="btn btn-primary full">Login to dashboard →</button>
-          </form>
-          <div className="demo-hint"><b>Demo access</b><span>Username: warden</span><span>Password: hostel123</span></div>
         </div>
-      </div>
-    );
-  }
 
-  function sidebar() {
-    return (
-      <aside className={`sidebar ${mobile ? 'show' : ''}`}>
-        <div className="side-brand">
-          <div onClick={goHome} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-            <span className="brand-icon"><ScanFace /></span>
-            <div><b>HOSTELCARE</b><small>WARDEN PORTAL</small></div>
+        <div style={ui.menuSectionLabel}>MAIN NAVIGATION</div>
+        <nav style={ui.navMenu}>
+          {[
+            { id: "dashboard", icon: "📊", label: "Dashboard Overview" },
+            { id: "attendance", icon: "📸", label: "Live Face Attendance" },
+            ...(role === "WARDEN"
+              ? [
+                  { id: "registration", icon: "👤", label: "Biometric Registration" },
+                  { id: "directory", icon: "🏠", label: "Hostel Directory" },
+                  { id: "reports", icon: "📑", label: "Reports & Defaulters" },
+                ]
+              : []),
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={() => switchTab(item.id)}
+              style={{
+                ...ui.navItem,
+                ...(activeTab === item.id ? ui.navItemActive : {}),
+              }}
+            >
+              <span style={{ marginRight: "10px" }}>{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* System Health Status */}
+        <div style={ui.systemBox}>
+          <div style={ui.sysRow}>
+            <span style={ui.dotGreen}></span> MySQL Database (8081)
           </div>
-          <button className="icon-btn mobile-close" onClick={() => setMobile(false)}><X /></button>
-        </div>
-        <div className="side-label">WORKSPACE</div>
-        {nav.map(([label, key, Icon]) => (
-          <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => { stopCamera(); setPage(key); setMobile(false); }}>
-            <Icon size={18} /><span>{label}</span>{page === key && <i />}
-          </button>
-        ))}
-        <div className="side-bottom">
-          <div className="warden-mini">
-            <div className="warden-avatar">W</div>
-            <div><b>Hostel Warden</b><small>Administrator</small></div>
+          <div style={ui.sysRow}>
+            <span style={ui.dotGreen}></span> Face AI Engine (5000)
           </div>
-          <button className="nav-item logout" onClick={logout}><LogOut size={18} />Logout</button>
+          <div style={{ fontSize: "11px", color: "#64748b", marginTop: "6px" }}>
+            Curfew Alert: After 09:30 PM
+          </div>
         </div>
       </aside>
-    );
-  }
 
-  function topbar() {
-    return (
-      <header className="topbar">
-        <button className="icon-btn mobile-menu" onClick={() => setMobile(true)}><Menu /></button>
-        <div>
-          <div className="crumb">WORKSPACE / <b>{pageTitle.toUpperCase()}</b></div>
-          <h2>{pageTitle}</h2>
-        </div>
-        <div className="top-actions">
-          <span className="today-pill"><CalendarDays size={15} />{new Date().toLocaleDateString()}</span>
-          <div className="top-avatar">W</div>
-        </div>
-      </header>
-    );
-  }
+      {/* RIGHT CONTENT AREA */}
+      <div style={ui.mainContainer}>
+        {/* TOP HEADER BAR */}
+        <header style={ui.topBar}>
+          <div>
+            <h1 style={ui.pageTitle}>
+              {activeTab === "dashboard" && "Warden Command Dashboard"}
+              {activeTab === "attendance" && "Live Biometric Face Terminal"}
+              {activeTab === "registration" && "New Student Face Enrollment"}
+              {activeTab === "directory" && "Registered Hostel Residents"}
+              {activeTab === "reports" && "Attendance Analytics & Defaulters"}
+            </h1>
+            <span style={ui.pageSubtitle}>Real-Time Face Recognition & Automated Curfew Tracking</span>
+          </div>
 
-  function stat(label, value, sub, Icon) {
-    return (
-      <div className="stat-card">
-        <div className="stat-top"><span>{label}</span><i><Icon size={19} /></i></div>
-        <strong>{value}</strong>
-        <small>{sub}</small>
-      </div>
-    );
-  }
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            {/* Role Switcher (Warden vs Student) */}
+            <select
+              value={role}
+              onChange={(e) => {
+                setRole(e.target.value);
+                switchTab("dashboard");
+              }}
+              style={ui.roleSelect}
+            >
+              <option value="WARDEN">🛡️ Role: Warden (Admin)</option>
+              <option value="STUDENT">🎓 Role: Student View</option>
+            </select>
+            <button onClick={syncMySQLData} style={ui.refreshBtn}>
+              ↻ Sync
+            </button>
+          </div>
+        </header>
 
-  function dashboard() {
-    return (
-      <>
-        <div className="welcome-row">
-          <div><h3>Good day, Warden 👋</h3><p>Here is your hostel overview for today.</p></div>
-          <span className="date-label"><CalendarDays size={16} />{new Date().toDateString()}</span>
-        </div>
-        <div className="stats-grid">
-          {stat('Total students', students.length, 'Registered residents', Users)}
-          {stat('Total employees', employees.length, 'Active staff', UserRound)}
-          {stat('Present today', presentToday, 'Recorded attendance', ClipboardCheck)}
-          {stat('Bills generated', bills.length, 'Total ₹' + totalBilled.toLocaleString('en-IN'), IndianRupee)}
-        </div>
-        <div className="content-grid">
-          <section className="panel">
-            <div className="panel-head">
-              <div><h3>Attendance overview</h3><p>Latest attendance entries</p></div>
-              <button className="subtle-btn" onClick={() => setPage('attendance')}>View all →</button>
-            </div>
-            {attendance.length ? (
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th>PERSON</th><th>DATE</th><th>TIME</th><th>METHOD</th><th>STATUS</th></tr></thead>
+        {/* PAGE BODY */}
+        <main style={ui.body}>
+          {/* 1. DASHBOARD */}
+          {activeTab === "dashboard" && (
+            <>
+              <div style={ui.kpiGrid}>
+                <div style={ui.kpiCard}>
+                  <div style={ui.kpiLabel}>Total Registered</div>
+                  <div style={ui.kpiNumber}>{students.length}</div>
+                  <div style={ui.kpiFoot}>Active Hostel Residents</div>
+                </div>
+                <div style={ui.kpiCard}>
+                  <div style={ui.kpiLabel}>Present Today</div>
+                  <div style={{ ...ui.kpiNumber, color: "#10b981" }}>{presentTodayCount}</div>
+                  <div style={ui.kpiFoot}>Verified via Face AI</div>
+                </div>
+                <div style={ui.kpiCard}>
+                  <div style={ui.kpiLabel}>Late Entries (&gt;9:30 PM)</div>
+                  <div style={{ ...ui.kpiNumber, color: "#f59e0b" }}>{lateEntriesCount}</div>
+                  <div style={ui.kpiFoot}>Curfew Violations</div>
+                </div>
+                <div style={ui.kpiCard}>
+                  <div style={ui.kpiLabel}>Defaulters (&lt;75%)</div>
+                  <div style={{ ...ui.kpiNumber, color: "#ef4444" }}>{defaulters.length}</div>
+                  <div style={ui.kpiFoot}>Requires Warden Notice</div>
+                </div>
+              </div>
+
+              <div style={ui.card}>
+                <div style={ui.cardHeader}>
+                  <h3 style={{ margin: 0 }}>Recent Attendance Activity</h3>
+                  <div style={{ display: "flex", gap: "10px" }}>
+                    <button onClick={exportAttendanceCSV} style={ui.outlineBtn}>
+                      ⬇ Export CSV
+                    </button>
+                    <button onClick={() => switchTab("attendance")} style={ui.primaryBtn}>
+                      + Open Face Scanner
+                    </button>
+                  </div>
+                </div>
+                <table style={ui.table}>
+                  <thead>
+                    <tr>
+                      <th style={ui.th}>Student ID</th>
+                      <th style={ui.th}>Name</th>
+                      <th style={ui.th}>Date</th>
+                      <th style={ui.th}>Punch Time</th>
+                      <th style={ui.th}>Match %</th>
+                      <th style={ui.th}>Status</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {attendance.slice(0, 5).map((a, i) => (
-                      <tr key={i}>
-                        <td><b>{a.name}</b><small>{a.personId}</small></td>
-                        <td>{a.date}</td><td>{a.time}</td><td>{a.method}</td>
-                        <td><span className="status present">{a.status}</span></td>
+                    {attendance.length === 0 ? (
+                      <tr>
+                        <td colSpan="6" style={{ textAlign: "center", padding: "20px", color: "#64748b" }}>
+                          No attendance punches recorded yet. Click "Open Face Scanner" to mark attendance.
+                        </td>
+                      </tr>
+                    ) : (
+                      attendance.slice(0, 10).map((r) => (
+                        <tr key={r.id}>
+                          <td style={ui.td}><strong>{r.personId}</strong></td>
+                          <td style={ui.td}>{r.personName}</td>
+                          <td style={ui.td}>{r.attendanceDate}</td>
+                          <td style={ui.td}>{r.punchTime}</td>
+                          <td style={ui.td}>{r.confidence}%</td>
+                          <td style={ui.td}>
+                            <span style={r.status === "Late Entry" ? ui.badgeLate : ui.badgePresent}>
+                              {r.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {/* 2. LIVE FACE ATTENDANCE */}
+          {activeTab === "attendance" && (
+            <div style={ui.twoColumn}>
+              <div style={ui.card}>
+                <h3 style={{ marginTop: 0 }}>Biometric Camera Feed</h3>
+                <div style={ui.cameraFrame}>
+                  <video ref={videoRef} autoPlay playsInline style={ui.video} />
+                  <canvas ref={canvasRef} style={{ display: "none" }} />
+                </div>
+                <div style={{ display: "flex", gap: "12px", marginTop: "14px" }}>
+                  <button onClick={startCamera} style={ui.darkBtn}>
+                    📷 Open Camera
+                  </button>
+                  <button
+                    onClick={handleScanAttendance}
+                    disabled={!cameraActive || loading}
+                    style={ui.successBtn}
+                  >
+                    {loading ? "Verifying Face..." : "✅ Scan & Mark Present"}
+                  </button>
+                </div>
+                {scanMessage.text && (
+                  <div style={getAlertStyle(scanMessage.type)}>{scanMessage.text}</div>
+                )}
+              </div>
+
+              <div style={ui.card}>
+                <div style={ui.cardHeader}>
+                  <h3 style={{ margin: 0 }}>Live MySQL Attendance Log</h3>
+                  <span style={{ fontSize: "12px", color: "#64748b" }}>Auto-blocks duplicate punches</span>
+                </div>
+                <table style={ui.table}>
+                  <thead>
+                    <tr>
+                      <th style={ui.th}>ID</th>
+                      <th style={ui.th}>Name</th>
+                      <th style={ui.th}>Time</th>
+                      <th style={ui.th}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {attendance.map((r) => (
+                      <tr key={r.id}>
+                        <td style={ui.td}>{r.personId}</td>
+                        <td style={ui.td}>{r.personName}</td>
+                        <td style={ui.td}>{r.punchTime}</td>
+                        <td style={ui.td}>
+                          <span style={r.status === "Late Entry" ? ui.badgeLate : ui.badgePresent}>
+                            {r.status}
+                          </span>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            ) : (
-              <div className="empty">
-                <ClipboardCheck size={30} /><b>No attendance entries yet</b><span>Start by marking attendance for today.</span>
-                <button className="btn btn-primary" onClick={() => setPage('attendance')}>Mark attendance</button>
-              </div>
-            )}
-          </section>
-          <section className="panel quick-panel">
-            <div className="panel-head"><div><h3>Quick actions</h3><p>Common tasks</p></div></div>
-            <button onClick={() => setPage('registration')}><span className="quick-icon blue"><Plus /></span><span><b>Register a student</b><small>Enroll details & face</small></span><span>→</span></button>
-            <button onClick={() => setPage('attendance')}><span className="quick-icon green"><ScanFace /></span><span><b>Face attendance</b><small>Scan using webcam</small></span><span>→</span></button>
-            <button onClick={() => setPage('billing')}><span className="quick-icon orange"><Receipt /></span><span><b>Generate a bill</b><small>Create a student bill</small></span><span>→</span></button>
-            <button onClick={() => setPage('reports')}><span className="quick-icon purple"><FileText /></span><span><b>View reports</b><small>Monthly insights</small></span><span>→</span></button>
-          </section>
-        </div>
-      </>
-    );
-  }
-
-  function faceCaptureBox() {
-    return (
-      <div className="full-span note-box" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-          <span>{capturedFace ? '✅ Face captured clearly!' : '⚠️ Face capture required before saving'}</span>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {!cameraOpen ? (
-              <button type="button" className="btn btn-outline" onClick={startCamera}>
-                <Camera size={16} /> Open Camera
-              </button>
-            ) : (
-              <>
-                <button type="button" className="btn btn-primary" disabled={processingFace} onClick={captureFaceForRegistration}>
-                  <ScanFace size={16} /> {processingFace ? 'Checking...' : 'Capture Face'}
-                </button>
-                <button type="button" className="btn btn-outline" onClick={stopCamera}>Close</button>
-              </>
-            )}
-          </div>
-        </div>
-        {cameraOpen && (
-          <video ref={videoRef} autoPlay playsInline style={{ width: '100%', maxWidth: '320px', borderRadius: '10px', border: '2px solid #2563eb' }} />
-        )}
-        {capturedFace && !cameraOpen && (
-          <img src={capturedFace} alt="Captured face" style={{ width: '120px', height: '90px', objectFit: 'cover', borderRadius: '8px', border: '2px solid #16a34a' }} />
-        )}
-        <canvas ref={canvasRef} style={{ display: 'none' }} />
-      </div>
-    );
-  }
-
-  function registration() {
-    return (
-      <>
-        <div className="tabs">
-          <button className={activeTab === 'students' ? 'selected' : ''} onClick={() => { stopCamera(); setActiveTab('students'); setCapturedFace(''); }}>Student Registration</button>
-          <button className={activeTab === 'employees' ? 'selected' : ''} onClick={() => { stopCamera(); setActiveTab('employees'); setCapturedFace(''); }}>Employee Registration</button>
-        </div>
-        <div className="content-grid form-layout">
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h3>{activeTab === 'students' ? 'Register student' : 'Register employee'}</h3>
-                <p>Capture face photo via webcam before saving record.</p>
-              </div>
             </div>
-            {activeTab === 'students' ? (
-              <form key="student-form" className="form-grid" onSubmit={addStudent}>
-                <label>Student name<input name="name" type="text" required placeholder="Full name" /></label>
-                <label>Course / department<input name="course" type="text" required placeholder="e.g. B.E. CSE" /></label>
-                <label>Room number<input name="room" type="text" required placeholder="e.g. 104" /></label>
-                <label>Mobile number<input name="phone" type="tel" required pattern="[0-9]{10}" placeholder="10-digit number" /></label>
-                {faceCaptureBox()}
-                <button type="submit" className="btn btn-primary full-span"><Plus size={16} /> Save student</button>
-              </form>
-            ) : (
-              <form key="employee-form" className="form-grid" onSubmit={addEmployee}>
-                <label>Employee name<input name="name" type="text" required placeholder="Full name" /></label>
-                <label>Designation<input name="role" type="text" required placeholder="e.g. Warden assistant" /></label>
-                <label>Mobile number<input name="phone" type="tel" required pattern="[0-9]{10}" placeholder="10-digit number" /></label>
-                {faceCaptureBox()}
-                <button type="submit" className="btn btn-primary full-span"><Plus size={16} /> Save employee</button>
-              </form>
-            )}
-          </section>
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h3>{activeTab === 'students' ? 'Registered students' : 'Registered employees'}</h3>
-                <p>{activeTab === 'students' ? students.length : employees.length} records</p>
-              </div>
-            </div>
-            <div className="search-box"><Search size={16} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search records..." /></div>
-            <div className="record-list">
-              {(activeTab === 'students' ? filteredStudents : filteredEmployees).map(p => (
-                <div className="record" key={p.id}>
-                  <div className="record-avatar">{p.name[0]}</div>
-                  <div>
-                    <b>{p.name}</b>
-                    <small>{p.id} · {activeTab === 'students' ? `Room ${p.room}` : p.role} {p.biometric ? '· 👤 Face Enrolled' : ''}</small>
-                  </div>
-                  <span className="status present">{p.status}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
-      </>
-    );
-  }
+          )}
 
-  function attendancePage() {
-    return (
-      <>
-        <div className="welcome-row">
-          <div><h3>Attendance management</h3><p>Scan face via webcam or record attendance manually.</p></div>
-          <input className="date-input" type="date" value={manualDate} onChange={e => setManualDate(e.target.value)} />
-        </div>
-        <div className="method-grid">
-          <div className="method-card">
-            <div className="method-icon purple"><ScanFace /></div>
-            <h3>AI face recognition</h3>
-            <p>Use your webcam to verify enrolled face and mark Present automatically.</p>
-            <span className="status present">Webcam AI active (Port 5000)</span>
-            {cameraOpen && (
-              <video ref={videoRef} autoPlay playsInline style={{ width: '100%', borderRadius: '10px', marginTop: '8px', border: '2px solid #7c3aed' }} />
-            )}
-            <canvas ref={canvasRef} style={{ display: 'none' }} />
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px' }}>
-              {!cameraOpen ? (
-                <button className="btn btn-primary" onClick={startCamera}>
-                  <Camera size={16} /> Open Face Camera
-                </button>
-              ) : (
-                <>
-                  <button className="btn btn-primary" disabled={processingFace} onClick={scanFaceAttendance}>
-                    {processingFace ? 'Verifying...' : 'Scan & Mark Present'}
+          {/* 3. REGISTRATION */}
+          {activeTab === "registration" && (
+            <div style={ui.twoColumn}>
+              <div style={ui.card}>
+                <h3 style={{ marginTop: 0 }}>Resident Details</h3>
+                <form onSubmit={handleSaveRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <label style={ui.label}>Auto-Generated Student ID</label>
+                  <input value={regForm.id} readOnly style={{ ...ui.input, backgroundColor: "#f1f5f9" }} />
+
+                  <label style={ui.label}>Full Name *</label>
+                  <input
+                    placeholder="Enter student full name"
+                    value={regForm.name}
+                    onChange={(e) => setRegForm({ ...regForm, name: e.target.value })}
+                    style={ui.input}
+                  />
+
+                  <label style={ui.label}>Department / Course</label>
+                  <input
+                    placeholder="e.g. B.E CSE"
+                    value={regForm.course}
+                    onChange={(e) => setRegForm({ ...regForm, course: e.target.value })}
+                    style={ui.input}
+                  />
+
+                  <label style={ui.label}>Hostel Room Number *</label>
+                  <input
+                    placeholder="e.g. Block-A 104"
+                    value={regForm.room}
+                    onChange={(e) => setRegForm({ ...regForm, room: e.target.value })}
+                    style={ui.input}
+                  />
+
+                  <label style={ui.label}>Mobile Number</label>
+                  <input
+                    placeholder="e.g. 9876543210"
+                    value={regForm.phone}
+                    onChange={(e) => setRegForm({ ...regForm, phone: e.target.value })}
+                    style={ui.input}
+                  />
+
+                  <button type="submit" disabled={loading} style={ui.successBtn}>
+                    {loading ? "Saving to Database..." : "💾 Register Student & Biometric"}
                   </button>
-                  <button className="btn btn-outline" onClick={stopCamera}>Stop</button>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className="method-card">
-            <div className="method-icon blue"><Fingerprint /></div>
-            <h3>Fingerprint attendance</h3>
-            <p>Optional external USB RD Service scanner bridge.</p>
-            <span className="status warning">Optional hardware</span>
-            <button className="btn btn-outline" onClick={() => notify('Using Face Recognition as primary biometric mode.')}>Check status</button>
-          </div>
-
-          <div className="method-card">
-            <div className="method-icon green"><ClipboardCheck /></div>
-            <h3>Manual attendance</h3>
-            <p>Select a student or employee and record Present attendance directly.</p>
-            <span className="status present">Fallback active</span>
-            <div className="manual-actions">
-              {[...students, ...employees].map(p => (
-                <div className="manual-row" key={p.id}>
-                  <span><b>{p.name}</b><small>{p.id}</small></span>
-                  <button className="mini-btn" onClick={() => mark(p.id, 'Manual', 'Present')}>Present</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-        <section className="panel">
-          <div className="panel-head"><div><h3>Attendance records</h3><p>Saved entries for selected date</p></div></div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>NAME</th><th>ID</th><th>DATE</th><th>TIME</th><th>METHOD</th><th>STATUS</th></tr></thead>
-              <tbody>
-                {attendance.filter(a => a.date === manualDate).map((a, i) => (
-                  <tr key={i}>
-                    <td>{a.name}</td><td>{a.personId}</td><td>{a.date}</td><td>{a.time}</td><td>{a.method}</td>
-                    <td><span className="status present">{a.status}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!attendance.some(a => a.date === manualDate) && <div className="empty compact">No records for this date.</div>}
-          </div>
-        </section>
-      </>
-    );
-  }
-
-  function billing() {
-    return (
-      <>
-        <div className="content-grid form-layout">
-          <section className="panel">
-            <div className="panel-head"><div><h3>Generate general bill</h3><p>Create a hostel bill for a registered student.</p></div></div>
-            <form className="form-grid" onSubmit={createBill}>
-              <label className="full-span">Student
-                <select required value={billForm.studentId} onChange={e => setBillForm({ ...billForm, studentId: e.target.value })}>
-                  <option value="">Select student</option>
-                  {students.map(s => <option value={s.id} key={s.id}>{s.name} ({s.id})</option>)}
-                </select>
-              </label>
-              <label>Billing month<input type="month" value={billForm.month} onChange={e => setBillForm({ ...billForm, month: e.target.value })} /></label>
-              {[['rent', 'Hostel rent'], ['mess', 'Mess charges'], ['electricity', 'Electricity'], ['other', 'Other charges'], ['paid', 'Paid amount']].map(([k, l]) => (
-                <label key={k}>{l} (₹)<input type="number" min="0" value={billForm[k]} onChange={e => setBillForm({ ...billForm, [k]: e.target.value })} /></label>
-              ))}
-              <div className="full-span total-preview">
-                <span>Estimated total</span>
-                <b>₹{(['rent', 'mess', 'electricity', 'other'].reduce((n, k) => n + Number(billForm[k] || 0), 0)).toLocaleString('en-IN')}</b>
+                </form>
+                {regMessage.text && <div style={getAlertStyle(regMessage.type)}>{regMessage.text}</div>}
               </div>
-              <button className="btn btn-primary full-span">Generate bill</button>
-            </form>
-          </section>
-          <section className="panel">
-            <div className="panel-head"><div><h3>Bill summary</h3><p>{bills.length} bills generated</p></div></div>
-            <div className="bill-summary">
-              <small>Total billed</small><strong>₹{totalBilled.toLocaleString('en-IN')}</strong>
-              <small>Outstanding balance</small><strong>₹{bills.reduce((n, b) => n + b.balance, 0).toLocaleString('en-IN')}</strong>
+
+              <div style={ui.card}>
+                <h3 style={{ marginTop: 0 }}>Face Template Capture</h3>
+                <div style={ui.cameraFrame}>
+                  <video ref={videoRef} autoPlay playsInline style={ui.video} />
+                  <canvas ref={canvasRef} style={{ display: "none" }} />
+                </div>
+                <div style={{ display: "flex", gap: "12px", marginTop: "14px" }}>
+                  <button type="button" onClick={startCamera} style={ui.darkBtn}>
+                    📷 Open Camera
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCaptureFace}
+                    disabled={!cameraActive}
+                    style={ui.primaryBtn}
+                  >
+                    🎯 Capture Face
+                  </button>
+                </div>
+                {capturedImg && (
+                  <div style={{ marginTop: "14px" }}>
+                    <small style={{ color: "#10b981", fontWeight: "bold" }}>Captured Face Preview:</small>
+                    <img
+                      src={capturedImg}
+                      alt="Captured"
+                      style={{ width: "120px", borderRadius: "8px", display: "block", marginTop: "6px", border: "2px solid #10b981" }}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
-          </section>
-        </div>
-        <section className="panel">
-          <div className="panel-head"><div><h3>Bill records</h3><p>Generated hostel bills</p></div></div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>BILL NO.</th><th>STUDENT</th><th>MONTH</th><th>TOTAL</th><th>BALANCE</th><th>STATUS</th><th>ACTION</th></tr></thead>
-              <tbody>
-                {bills.map(b => (
-                  <tr key={b.id}>
-                    <td>{b.id}</td><td>{b.studentName}</td><td>{b.month}</td><td>₹{b.total}</td><td>₹{b.balance}</td>
-                    <td><span className={`status ${b.status === 'Paid' ? 'present' : 'warning'}`}>{b.status}</span></td>
-                    <td><button className="mini-btn" onClick={() => window.print()}><Printer size={14} /> Print</button></td>
+          )}
+
+          {/* 4. HOSTEL DIRECTORY */}
+          {activeTab === "directory" && (
+            <div style={ui.card}>
+              <div style={ui.cardHeader}>
+                <h3 style={{ margin: 0 }}>Registered Students ({filteredStudents.length})</h3>
+                <input
+                  placeholder="🔍 Search by Name, ID or Room..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{ ...ui.input, width: "260px" }}
+                />
+              </div>
+              <table style={ui.table}>
+                <thead>
+                  <tr>
+                    <th style={ui.th}>Student ID</th>
+                    <th style={ui.th}>Name</th>
+                    <th style={ui.th}>Course</th>
+                    <th style={ui.th}>Room</th>
+                    <th style={ui.th}>Phone</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-            {!bills.length && <div className="empty compact">No bills generated yet.</div>}
-          </div>
-        </section>
-      </>
-    );
-  }
+                </thead>
+                <tbody>
+                  {filteredStudents.map((s) => (
+                    <tr key={s.id}>
+                      <td style={ui.td}><strong>{s.id}</strong></td>
+                      <td style={ui.td}>{s.name}</td>
+                      <td style={ui.td}>{s.course}</td>
+                      <td style={ui.td}>{s.room}</td>
+                      <td style={ui.td}>{s.phone}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-  function reports() {
-    const month = new Date().toISOString().slice(0, 7);
-    const monthRows = attendance.filter(a => a.date.startsWith(month));
-    const pct = monthRows.length ? Math.round(monthRows.filter(a => a.status === 'Present').length / monthRows.length * 100) : 0;
-    return (
-      <>
-        <div className="stats-grid">
-          {stat('Attendance entries', attendance.length, 'All saved records', ClipboardCheck)}
-          {stat('This month', monthRows.length, 'Attendance records', CalendarDays)}
-          {stat('Present rate', pct + '%', 'Based on recorded entries', Activity)}
-          {stat('Bills outstanding', '₹' + bills.reduce((n, b) => n + b.balance, 0).toLocaleString('en-IN'), 'Pending balance', IndianRupee)}
-        </div>
-        <section className="panel">
-          <div className="panel-head">
-            <div><h3>Monthly attendance report</h3><p>Current month: {month}</p></div>
-            <button className="btn btn-outline" onClick={() => window.print()}><Printer size={15} /> Print report</button>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>PERSON</th><th>ID</th><th>DATE</th><th>TIME</th><th>METHOD</th><th>STATUS</th></tr></thead>
-              <tbody>
-                {monthRows.map((a, i) => (
-                  <tr key={i}><td>{a.name}</td><td>{a.personId}</td><td>{a.date}</td><td>{a.time}</td><td>{a.method}</td><td>{a.status}</td></tr>
-                ))}
-              </tbody>
-            </table>
-            {!monthRows.length && <div className="empty compact">No attendance data for this month yet.</div>}
-          </div>
-        </section>
-        <section className="panel">
-          <div className="panel-head"><div><h3>Financial report</h3><p>Bill collection overview</p></div></div>
-          <div className="report-bars">
-            <div><span>Total billed</span><b>₹{totalBilled.toLocaleString('en-IN')}</b><div className="bar"><i style={{ width: '100%' }} /></div></div>
-            <div><span>Collected</span><b>₹{bills.reduce((n, b) => n + Number(b.paid), 0).toLocaleString('en-IN')}</b><div className="bar"><i style={{ width: (totalBilled ? bills.reduce((n, b) => n + Number(b.paid), 0) / totalBilled * 100 : 0) + '%' }} /></div></div>
-          </div>
-        </section>
-      </>
-    );
-  }
-
-  function settings() {
-    return (
-      <section className="panel settings-panel">
-        <div className="panel-head"><div><h3>System settings</h3><p>Face recognition & backend service status.</p></div></div>
-        <div className="setting-row">
-          <div><b>Python Face Recognition Service</b><small>http://localhost:5000 (OpenCV Haar Cascade)</small></div>
-          <span className="status present">Active</span>
-        </div>
-        <div className="setting-row">
-          <div><b>Spring Boot REST API</b><small>http://localhost:8081/api/biometric (MySQL persistence)</small></div>
-          <span className="status present">Configured</span>
-        </div>
-      </section>
-    );
-  }
-
-  const pages = { dashboard, registration, attendance: attendancePage, billing, reports, settings };
-
-  if (page === 'landing') return <>{landing()}{notice && <div className="toast">{notice}</div>}</>;
-  if (page === 'login') return <>{loginPage()}{notice && <div className="toast">{notice}</div>}</>;
-  if (!logged) {
-    setPage('login');
-    return null;
-  }
-
-  return (
-    <div className="app-shell">
-      {sidebar()}
-      <main className="main-area">
-        {topbar()}
-        <div className="page-content">{(pages[page] || dashboard)()}</div>
-        <footer className="app-footer">
-          <span onClick={goHome} style={{ cursor: 'pointer', fontWeight: 700 }}>HOSTELCARE</span> · Hostel Biometric Attendance Management System <span>2026</span>
-        </footer>
-      </main>
-      {notice && <div className="toast">{notice}</div>}
+          {/* 5. REPORTS & DEFAULTERS */}
+          {activeTab === "reports" && (
+            <div style={ui.card}>
+              <div style={ui.cardHeader}>
+                <div>
+                  <h3 style={{ margin: 0, color: "#ef4444" }}>Defaulter Alert List (&lt;75% Attendance)</h3>
+                  <small style={{ color: "#64748b" }}>Calculated automatically from MySQL attendance_records</small>
+                </div>
+                <button onClick={exportAttendanceCSV} style={ui.primaryBtn}>
+                  ⬇ Download Monthly CSV Report
+                </button>
+              </div>
+              <table style={ui.table}>
+                <thead>
+                  <tr>
+                    <th style={ui.th}>Student ID</th>
+                    <th style={ui.th}>Name</th>
+                    <th style={ui.th}>Room No</th>
+                    <th style={ui.th}>Attendance %</th>
+                    <th style={ui.th}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {defaulters.length === 0 ? (
+                    <tr>
+                      <td colSpan="5" style={{ textAlign: "center", padding: "20px", color: "#10b981" }}>
+                        All students have above 75% attendance!
+                      </td>
+                    </tr>
+                  ) : (
+                    defaulters.map((d) => (
+                      <tr key={d.id} style={{ backgroundColor: "#fef2f2" }}>
+                        <td style={ui.td}><strong>{d.id}</strong></td>
+                        <td style={ui.td}>{d.name}</td>
+                        <td style={ui.td}>{d.room}</td>
+                        <td style={{ ...ui.td, color: "#dc2626", fontWeight: "bold" }}>{d.percentage}%</td>
+                        <td style={ui.td}>
+                          <span style={ui.badgeLate}>Low Attendance</span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const getAlertStyle = (type) => ({
+  marginTop: "14px",
+  padding: "12px",
+  borderRadius: "8px",
+  fontWeight: "600",
+  fontSize: "14px",
+  backgroundColor: type === "success" ? "#dcfce7" : type === "warning" ? "#fef3c7" : type === "info" ? "#e0f2fe" : "#fee2e2",
+  color: type === "success" ? "#166534" : type === "warning" ? "#92400e" : type === "info" ? "#075985" : "#991b1b",
+});
+
+const ui = {
+  appWrapper: { display: "flex", minHeight: "100vh", fontFamily: "'Inter', 'Segoe UI', sans-serif", backgroundColor: "#f1f5f9", color: "#0f172a" },
+  sidebar: { width: "260px", backgroundColor: "#0f172a", color: "#f8fafc", display: "flex", flexDirection: "column", padding: "22px 18px" },
+  brandHeader: { display: "flex", alignItems: "center", gap: "12px", paddingBottom: "20px", borderBottom: "1px solid #1e293b" },
+  brandIcon: { width: "42px", height: "42px", borderRadius: "10px", background: "linear-gradient(135deg, #2563eb, #3b82f6)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "800", fontSize: "20px", color: "#fff" },
+  brandName: { fontWeight: "700", fontSize: "17px", letterSpacing: "0.6px" },
+  brandTag: { fontSize: "11px", color: "#94a3b8" },
+  menuSectionLabel: { fontSize: "11px", fontWeight: "700", color: "#64748b", marginTop: "22px", marginBottom: "10px", letterSpacing: "0.8px" },
+  navMenu: { display: "flex", flexDirection: "column", gap: "6px", flex: 1 },
+  navItem: { display: "flex", alignItems: "center", padding: "11px 14px", borderRadius: "8px", border: "none", backgroundColor: "transparent", color: "#cbd5e1", cursor: "pointer", fontSize: "14px", fontWeight: "500", textAlign: "left", transition: "0.2s" },
+  navItemActive: { backgroundColor: "#2563eb", color: "#ffffff", fontWeight: "600" },
+  systemBox: { backgroundColor: "#1e293b", padding: "14px", borderRadius: "10px", fontSize: "12px", color: "#cbd5e1" },
+  sysRow: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" },
+  dotGreen: { width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#10b981", display: "inline-block" },
+  mainContainer: { flex: 1, display: "flex", flexDirection: "column" },
+  topBar: { backgroundColor: "#ffffff", padding: "18px 30px", borderBottom: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  pageTitle: { margin: 0, fontSize: "20px", fontWeight: "700" },
+  pageSubtitle: { fontSize: "13px", color: "#64748b" },
+  roleSelect: { padding: "8px 12px", borderRadius: "8px", border: "1px solid #cbd5e1", fontWeight: "600", backgroundColor: "#f8fafc", cursor: "pointer" },
+  refreshBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid #cbd5e1", backgroundColor: "#fff", cursor: "pointer", fontWeight: "600" },
+  body: { padding: "26px 30px", display: "flex", flexDirection: "column", gap: "22px" },
+  kpiGrid: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "18px" },
+  kpiCard: { backgroundColor: "#ffffff", padding: "20px", borderRadius: "12px", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
+  kpiLabel: { fontSize: "13px", color: "#64748b", fontWeight: "600" },
+  kpiNumber: { fontSize: "30px", fontWeight: "800", margin: "6px 0" },
+  kpiFoot: { fontSize: "12px", color: "#94a3b8" },
+  card: { backgroundColor: "#ffffff", padding: "22px", borderRadius: "12px", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
+  cardHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" },
+  twoColumn: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" },
+  cameraFrame: { backgroundColor: "#0f172a", borderRadius: "10px", overflow: "hidden", minHeight: "270px", display: "flex", alignItems: "center", justifyContent: "center" },
+  video: { width: "100%", display: "block" },
+  label: { fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "-6px" },
+  input: { padding: "10px 14px", borderRadius: "8px", border: "1px solid #cbd5e1", fontSize: "14px" },
+  primaryBtn: { backgroundColor: "#2563eb", color: "#fff", border: "none", padding: "10px 16px", borderRadius: "8px", cursor: "pointer", fontWeight: "600" },
+  successBtn: { backgroundColor: "#10b981", color: "#fff", border: "none", padding: "11px 16px", borderRadius: "8px", cursor: "pointer", fontWeight: "600" },
+  darkBtn: { backgroundColor: "#0f172a", color: "#fff", border: "none", padding: "10px 16px", borderRadius: "8px", cursor: "pointer", fontWeight: "600" },
+  outlineBtn: { backgroundColor: "#fff", color: "#0f172a", border: "1px solid #cbd5e1", padding: "10px 16px", borderRadius: "8px", cursor: "pointer", fontWeight: "600" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: "14px" },
+  th: { textAlign: "left", padding: "11px 12px", borderBottom: "2px solid #e2e8f0", color: "#475569", fontSize: "13px" },
+  td: { padding: "11px 12px", borderBottom: "1px solid #f1f5f9" },
+  badgePresent: { backgroundColor: "#dcfce7", color: "#166534", padding: "4px 10px", borderRadius: "999px", fontSize: "12px", fontWeight: "700" },
+  badgeLate: { backgroundColor: "#fee2e2", color: "#991b1b", padding: "4px 10px", borderRadius: "999px", fontSize: "12px", fontWeight: "700" },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <HostelCareApp />
+  </React.StrictMode>
+);
